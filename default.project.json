@@ -1,0 +1,11 @@
+{
+  "name": "Cuchillo",
+  "tree": {
+    "$className": "DataModel",
+    "StarterPack": {
+      "Cuchillo": {
+        "$path": "src/Cuchillo"
+      }
+    }
+  }
+}

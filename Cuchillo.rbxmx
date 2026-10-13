@@ -1,0 +1,879 @@
+<roblox version="4">
+  <Item class="Tool" referent="0">
+    <Properties>
+      <string name="Name">Cuchillo</string>
+      <bool name="CanBeDropped">false</bool>
+      <bool name="NeedsPivotMigration">false</bool>
+      <bool name="RequiresHandle">true</bool>
+      <string name="ToolTip">Cuchillo</string>
+    </Properties>
+    <Item class="ModuleScript" referent="1">
+      <Properties>
+        <string name="Name">Animaciones</string>
+        <string name="Source"><![CDATA[-- Animaciones: poses de la mano hechas con CFrames (no hacen falta AnimationIds).
+--
+-- Cada clip es una lista de claves en el tiempo. Una pose tiene:
+--   pos  = desplazamiento en espacio de camara (unidades, X derecha, Y arriba, Z atras)
+--   rot  = giro del brazo alrededor de la muneca, en grados y en ejes de la camara
+--          (X apunta arriba/abajo, Y izquierda/derecha, Z gira en el plano de la pantalla)
+--   giro = giro de la muneca alrededor del mango, en grados (Z rueda sobre la hoja)
+
+local Animaciones = {}
+
+export type Pose = { pos: Vector3, rot: Vector3, giro: Vector3 }
+export type Clave = { t: number, pose: Pose, suavizado: string? }
+export type Clip = { claves: { Clave } }
+
+-- Punto de giro del brazo, relativo a la mano (un poco atras y a la derecha: la muneca).
+local MUNECA = Vector3.new(0.25, -0.2, 0.35)
+
+local function P(
+	px: number,
+	py: number,
+	pz: number,
+	rx: number?,
+	ry: number?,
+	rz: number?,
+	gx: number?,
+	gy: number?,
+	gz: number?
+): Pose
+	return {
+		pos = Vector3.new(px, py, pz),
+		rot = Vector3.new(rx or 0, ry or 0, rz or 0),
+		giro = Vector3.new(gx or 0, gy or 0, gz or 0),
+	}
+end
+
+local REPOSO = P(0, 0, 0)
+Animaciones.REPOSO = REPOSO
+
+local SUAVIZADOS: { [string]: (number) -> number } = {
+	lineal = function(a)
+		return a
+	end,
+	-- rapido al inicio y frena al final
+	salida = function(a)
+		return 1 - (1 - a) ^ 3
+	end,
+	entrada = function(a)
+		return a * a * a
+	end,
+	suave = function(a)
+		return -(math.cos(math.pi * a) - 1) / 2
+	end,
+	-- se pasa un poco y vuelve
+	rebote = function(a)
+		local c1 = 1.70158
+		return 1 + (c1 + 1) * (a - 1) ^ 3 + c1 * (a - 1) ^ 2
+	end,
+}
+
+Animaciones.EQUIPAR = {
+	claves = {
+		{ t = 0, pose = P(0.3, -1.3, 0.3, -45, -10, 25) },
+		{ t = 0.4, pose = REPOSO, suavizado = "rebote" },
+	},
+} :: Clip
+
+-- Tajo de derecha a izquierda
+Animaciones.TAJO_1 = {
+	claves = {
+		{ t = 0, pose = REPOSO },
+		{ t = 0.07, pose = P(0.3, 0.25, 0.1, 5, -10, -25, 0, 0, -10), suavizado = "salida" },
+		{ t = 0.17, pose = P(-0.45, 0.1, -0.05, 2, 10, 40, 0, 0, 20), suavizado = "salida" },
+		{ t = 0.45, pose = REPOSO, suavizado = "suave" },
+	},
+} :: Clip
+
+-- Reves de izquierda a derecha
+Animaciones.TAJO_2 = {
+	claves = {
+		{ t = 0, pose = REPOSO },
+		{ t = 0.07, pose = P(-0.5, 0.1, 0, 0, 10, 30, 0, 0, 20), suavizado = "salida" },
+		{ t = 0.17, pose = P(0.3, -0.4, -0.1, -10, -15, -62, 0, 0, -25), suavizado = "salida" },
+		{ t = 0.45, pose = REPOSO, suavizado = "suave" },
+	},
+} :: Clip
+
+-- Acercar el cuchillo y girarlo para verlo por los dos lados
+Animaciones.INSPECCIONAR = {
+	claves = {
+		{ t = 0, pose = REPOSO },
+		{ t = 0.4, pose = P(-0.3, 0.15, 0.25, 0, 14, 10, 0, -20, 0), suavizado = "suave" },
+		{ t = 1.0, pose = P(-0.3, 0.2, 0.25, 4, 14, 10, 0, -20, 0), suavizado = "suave" },
+		{ t = 1.5, pose = P(-0.2, 0.1, 0.2, 0, 8, 6, 0, 10, 100), suavizado = "suave" },
+		{ t = 2.1, pose = P(-0.2, 0.12, 0.2, 2, 8, 6, 0, 10, 100), suavizado = "suave" },
+		{ t = 2.5, pose = REPOSO, suavizado = "suave" },
+	},
+} :: Clip
+
+function Animaciones.duracion(clip: Clip): number
+	return clip.claves[#clip.claves].t
+end
+
+local function mezclar(a: Pose, b: Pose, alfa: number): Pose
+	return {
+		pos = a.pos:Lerp(b.pos, alfa),
+		rot = a.rot:Lerp(b.rot, alfa),
+		giro = a.giro:Lerp(b.giro, alfa),
+	}
+end
+
+-- Pose del clip en el segundo t.
+function Animaciones.muestrear(clip: Clip, t: number): Pose
+	local claves = clip.claves
+	if t <= claves[1].t then
+		return claves[1].pose
+	end
+	for i = 2, #claves do
+		local b = claves[i]
+		if t <= b.t then
+			local a = claves[i - 1]
+			local alfa = (t - a.t) / (b.t - a.t)
+			local suavizar = SUAVIZADOS[b.suavizado or "lineal"] or SUAVIZADOS.lineal
+			return mezclar(a.pose, b.pose, suavizar(alfa))
+		end
+	end
+	return claves[#claves].pose
+end
+
+-- Una pose se aplica en dos partes: antes de la pose de reposo (brazo) y
+-- despues (giro del mango), asi: antes * reposo * despues.
+-- posMano es la posicion de la mano en reposo (POSE_REPOSO.Position).
+function Animaciones.aCFrames(pose: Pose, posMano: Vector3): (CFrame, CFrame)
+	local pivote = posMano + MUNECA
+	local r = pose.rot
+	local brazo = CFrame.new(pivote)
+		* CFrame.Angles(math.rad(r.X), math.rad(r.Y), math.rad(r.Z))
+		* CFrame.new(-pivote)
+	local g = pose.giro
+	return CFrame.new(pose.pos) * brazo, CFrame.Angles(math.rad(g.X), math.rad(g.Y), math.rad(g.Z))
+end
+
+-- Respiracion en reposo y vaiven al caminar (caminar va de 0 a 1).
+function Animaciones.balanceo(tiempo: number, caminar: number): CFrame
+	local respiracion = math.sin(tiempo * 1.8) * 0.02
+	local fase = tiempo * 9
+	local x = math.sin(fase) * 0.06 * caminar
+	local y = -math.abs(math.cos(fase)) * 0.07 * caminar + respiracion
+	local inclinacion = math.sin(fase) * math.rad(1.5) * caminar
+	return CFrame.new(x, y, 0) * CFrame.Angles(0, 0, inclinacion)
+end
+
+return Animaciones
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="RemoteEvent" referent="2">
+      <Properties>
+        <string name="Name">Ataque</string>
+      </Properties>
+    </Item>
+    <Item class="LocalScript" referent="3">
+      <Properties>
+        <string name="Name">Cliente</string>
+        <string name="Source"><![CDATA[-- Cliente: muestra la mano con el cuchillo en primera persona, la anima y
+-- avisa al servidor cuando atacas. Va dentro de la herramienta (LocalScript).
+
+local ContextActionService = game:GetService("ContextActionService")
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+local herramienta = script.Parent
+local Config = require(herramienta:WaitForChild("Config"))
+local Modelo = require(herramienta:WaitForChild("Modelo"))
+local Animaciones = require(herramienta:WaitForChild("Animaciones"))
+local eventoAtaque = herramienta:WaitForChild("Ataque") :: RemoteEvent
+
+local jugador = Players.LocalPlayer
+local NOMBRE_RENDER = "ViewmodelCuchillo"
+local NOMBRE_ACCION = "InspeccionarCuchillo"
+local POS_MANO = Config.POSE_REPOSO.Position
+
+local viewmodel: Model? = nil
+-- Piezas del viewmodel y su posicion respecto a la raiz (se arma en el origen).
+-- Moverlas siempre desde estos desfases evita que se separen con el tiempo.
+local partes: { BasePart } = {}
+local desfases: { CFrame } = {}
+local destinos: { CFrame } = {}
+local equipado = false
+local mostrandoViewmodel = false
+local conexiones: { RBXScriptConnection } = {}
+local modoCamaraAnterior: Enum.CameraMode? = nil
+
+local clipActual: Animaciones.Clip? = nil
+local tiempoClip = 0
+local siguienteTajo = 1
+local ultimoAtaque = -math.huge
+
+local tiempo = 0
+local caminar = 0
+local inercia = Vector2.zero
+local camaraAnterior: CFrame? = nil
+
+-- Sonidos creados en el cliente: solo los escuchas tu.
+local function crearSonido(id: string): Sound
+	local sonido = Instance.new("Sound")
+	sonido.SoundId = id
+	sonido.Volume = Config.VOLUMEN
+	sonido.Parent = script
+	return sonido
+end
+
+local sonidoTajo = crearSonido(Config.SONIDO_TAJO)
+local sonidoDesenfundar = crearSonido(Config.SONIDO_DESENFUNDAR)
+
+local function sonar(sonido: Sound)
+	sonido.TimePosition = 0
+	sonido:Play()
+end
+
+local function reproducir(clip: Animaciones.Clip)
+	clipActual = clip
+	tiempoClip = 0
+end
+
+local function colorPiel(personaje: Model): Color3?
+	if not Config.USAR_COLOR_DE_PIEL then
+		return nil
+	end
+	local mano = personaje:FindFirstChild("RightHand") or personaje:FindFirstChild("Right Arm")
+	if mano and mano:IsA("BasePart") then
+		return mano.Color
+	end
+	return nil
+end
+
+-- En primera persona la camara esta pegada a la cabeza.
+local function enPrimeraPersona(camara: Camera): boolean
+	return (camara.Focus.Position - camara.CFrame.Position).Magnitude < 1
+end
+
+-- El cuchillo "de verdad" (el que ven los demas) se oculta solo para ti
+-- cuando estas en primera persona, para que no tape la mano.
+local function ocultarCuchilloMundo(ocultar: boolean)
+	local handle = herramienta:FindFirstChild("Handle")
+	if not handle then
+		return
+	end
+	local valor = if ocultar then 1 else 0
+	for _, parte in handle:GetDescendants() do
+		if parte:IsA("BasePart") then
+			parte.LocalTransparencyModifier = valor
+		end
+	end
+end
+
+local function escalar(cf: CFrame, escala: number): CFrame
+	return CFrame.new(cf.Position * escala) * cf.Rotation
+end
+
+local function actualizar(dt: number)
+	local camara = workspace.CurrentCamera
+	local personaje = jugador.Character
+	if not (viewmodel and camara and personaje) then
+		return
+	end
+
+	-- Mostrar la mano solo en primera persona
+	local primera = enPrimeraPersona(camara)
+	if primera ~= mostrandoViewmodel then
+		mostrandoViewmodel = primera
+		viewmodel.Parent = if primera then camara else nil
+		ocultarCuchilloMundo(primera)
+	end
+
+	tiempo += dt
+
+	-- Animacion activa (equipar, tajo, inspeccionar)
+	local pose = Animaciones.REPOSO
+	if clipActual then
+		tiempoClip += dt
+		pose = Animaciones.muestrear(clipActual, tiempoClip)
+		if tiempoClip >= Animaciones.duracion(clipActual) then
+			clipActual = nil
+		end
+	end
+	local antes, despues = Animaciones.aCFrames(pose, POS_MANO)
+
+	-- Vaiven al caminar
+	local humanoide = personaje:FindFirstChildOfClass("Humanoid")
+	local objetivoCaminar = 0
+	if humanoide and humanoide.FloorMaterial ~= Enum.Material.Air then
+		objetivoCaminar = math.clamp(humanoide.MoveDirection.Magnitude, 0, 1) * Config.BALANCEO_CAMINAR
+	end
+	caminar += (objetivoCaminar - caminar) * math.min(1, dt * 8)
+	local balanceo = Animaciones.balanceo(tiempo, caminar)
+
+	-- Inercia: la mano se queda un poco atras cuando giras la camara
+	local cf = camara.CFrame
+	local objetivoInercia = Vector2.zero
+	if camaraAnterior and dt > 0 then
+		local delta = camaraAnterior:ToObjectSpace(cf)
+		local giroX, giroY = delta:ToEulerAnglesYXZ()
+		local limite = math.rad(6)
+		objetivoInercia = Vector2.new(
+			math.clamp(-giroX / dt * Config.INERCIA_CAMARA, -limite, limite),
+			math.clamp(-giroY / dt * Config.INERCIA_CAMARA, -limite, limite)
+		)
+	end
+	camaraAnterior = cf
+	inercia = inercia:Lerp(objetivoInercia, math.min(1, dt * 10))
+	local balanceoCamara = CFrame.Angles(inercia.X, inercia.Y, inercia.Y * 0.5)
+
+	local pose3D = balanceoCamara * balanceo * antes * Config.POSE_REPOSO * despues
+	local raiz = cf * escalar(pose3D, Config.ESCALA_VIEWMODEL)
+	for i, desfase in desfases do
+		destinos[i] = raiz * desfase
+	end
+	workspace:BulkMoveTo(partes, destinos, Enum.BulkMoveMode.FireCFrameChanged)
+end
+
+local function atacar()
+	if not equipado then
+		return
+	end
+	local ahora = os.clock()
+	if ahora - ultimoAtaque < Config.ENFRIAMIENTO then
+		return
+	end
+	ultimoAtaque = ahora
+
+	reproducir(if siguienteTajo == 1 then Animaciones.TAJO_1 else Animaciones.TAJO_2)
+	siguienteTajo = 3 - siguienteTajo
+	sonar(sonidoTajo)
+
+	task.delay(Config.RETRASO_GOLPE, function()
+		local camara = workspace.CurrentCamera
+		if equipado and camara then
+			eventoAtaque:FireServer(camara.CFrame.LookVector)
+		end
+	end)
+end
+
+local function inspeccionar(_nombre: string, estado: Enum.UserInputState): Enum.ContextActionResult
+	if estado == Enum.UserInputState.Begin and equipado and clipActual == nil then
+		reproducir(Animaciones.INSPECCIONAR)
+	end
+	return Enum.ContextActionResult.Pass
+end
+
+local function limpiar()
+	if not equipado then
+		return
+	end
+	equipado = false
+	RunService:UnbindFromRenderStep(NOMBRE_RENDER)
+	ContextActionService:UnbindAction(NOMBRE_ACCION)
+	for _, conexion in conexiones do
+		conexion:Disconnect()
+	end
+	table.clear(conexiones)
+	if viewmodel then
+		viewmodel:Destroy()
+		viewmodel = nil
+	end
+	table.clear(partes)
+	table.clear(desfases)
+	table.clear(destinos)
+	mostrandoViewmodel = false
+	clipActual = nil
+	camaraAnterior = nil
+	ocultarCuchilloMundo(false)
+	if modoCamaraAnterior then
+		jugador.CameraMode = modoCamaraAnterior
+		modoCamaraAnterior = nil
+	end
+end
+
+local function alEquipar()
+	local personaje = jugador.Character
+	if equipado or not personaje then
+		return
+	end
+	equipado = true
+
+	if Config.FORZAR_PRIMERA_PERSONA then
+		modoCamaraAnterior = jugador.CameraMode
+		jugador.CameraMode = Enum.CameraMode.LockFirstPerson
+	end
+
+	local nuevo = Modelo.crearViewmodel(Config.ESCALA_VIEWMODEL, colorPiel(personaje))
+	viewmodel = nuevo
+	for _, parte in nuevo:GetDescendants() do
+		if parte:IsA("BasePart") then
+			table.insert(partes, parte)
+			table.insert(desfases, parte.CFrame)
+		end
+	end
+	-- El modelo se mete en la camara en el primer cuadro si estas en primera persona
+	mostrandoViewmodel = false
+	tiempo, caminar, inercia = 0, 0, Vector2.zero
+
+	reproducir(Animaciones.EQUIPAR)
+	sonar(sonidoDesenfundar)
+
+	RunService:BindToRenderStep(NOMBRE_RENDER, Enum.RenderPriority.Camera.Value + 1, actualizar)
+	ContextActionService:BindAction(NOMBRE_ACCION, inspeccionar, false, Config.TECLA_INSPECCIONAR)
+
+	local humanoide = personaje:FindFirstChildOfClass("Humanoid")
+	if humanoide then
+		table.insert(conexiones, humanoide.Died:Connect(limpiar))
+	end
+end
+
+herramienta.Equipped:Connect(alEquipar)
+herramienta.Unequipped:Connect(limpiar)
+herramienta.Activated:Connect(atacar)
+script.Destroying:Connect(limpiar)
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="4">
+      <Properties>
+        <string name="Name">Config</string>
+        <string name="Source"><![CDATA[-- Config: todo lo que se puede ajustar del cuchillo sin tocar el resto del codigo.
+
+return {
+	-- Mano en primera persona (viewmodel) ---------------------------------------
+	-- Tamano de la mano y el cuchillo en pantalla. Mas pequeno = se mete menos en
+	-- las paredes; se ve igual porque la posicion se escala con el.
+	ESCALA_VIEWMODEL = 0.3,
+
+	-- Donde queda la mano respecto a la camara (en unidades, antes de escalar):
+	-- X = derecha, Y = arriba, -Z = adelante. Los angulos giran el cuchillo.
+	POSE_REPOSO = CFrame.new(0.8, -0.8, -1.55)
+		* CFrame.Angles(0, 0, math.rad(-18))
+		* CFrame.Angles(math.rad(36), math.rad(58), math.rad(-8)),
+
+	-- Pone la camara en primera persona mientras tienes el cuchillo en la mano.
+	FORZAR_PRIMERA_PERSONA = true,
+
+	-- Usa el color de piel del avatar para la mano (si es false usa el de Modelo).
+	USAR_COLOR_DE_PIEL = true,
+
+	-- Cuanto se mueve la mano al girar la camara y al caminar.
+	INERCIA_CAMARA = 0.035,
+	BALANCEO_CAMINAR = 1,
+
+	-- Cuchillo que ven los demas jugadores ---------------------------------------
+	ESCALA_MUNDO = 0.32,
+
+	-- Combate --------------------------------------------------------------------
+	DANO = 35,
+	ALCANCE = 7, -- studs desde la cabeza
+	ENFRIAMIENTO = 0.45, -- segundos entre tajos
+	RETRASO_GOLPE = 0.08, -- el golpe se envia cuando la hoja pasa por el centro
+	DANO_A_COMPANEROS = false, -- si hay equipos, no lastimar a los del mismo equipo
+
+	-- Sonidos (puedes cambiarlos por rbxassetid://TU_ID) -------------------------
+	SONIDO_TAJO = "rbxasset://sounds/swordslash.wav",
+	SONIDO_DESENFUNDAR = "rbxasset://sounds/unsheath.wav",
+	VOLUMEN = 0.5,
+
+	-- Tecla para mirar el cuchillo.
+	TECLA_INSPECCIONAR = Enum.KeyCode.F,
+}
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="ModuleScript" referent="5">
+      <Properties>
+        <string name="Name">Modelo</string>
+        <string name="Source"><![CDATA[-- Modelo: construye con Parts el cuchillo y el brazo en primera persona.
+--
+-- Todas las medidas estan en "unidades" y se multiplican por la escala que se
+-- pase a cada funcion, asi el mismo diseno sirve para la mano en pantalla
+-- (viewmodel) y para el cuchillo que ven los demas jugadores.
+--
+-- Ejes del cuchillo (el origen es el centro del mango, donde agarra la mano):
+--   -Z = hacia la punta   +Y = lomo con dientes   -Y = filo   +X = dorso de la mano
+
+local Modelo = {}
+
+Modelo.COLORES = {
+	hoja = Color3.fromRGB(220, 220, 246),
+	filo = Color3.fromRGB(244, 244, 255),
+	ranura = Color3.fromRGB(176, 176, 204),
+	dientes = Color3.fromRGB(202, 202, 232),
+	guarda = Color3.fromRGB(122, 122, 134),
+	guardaOscura = Color3.fromRGB(94, 94, 106),
+	mango = Color3.fromRGB(64, 64, 74),
+	mangoAnillo = Color3.fromRGB(96, 96, 108),
+	piel = Color3.fromRGB(242, 204, 186),
+	guante = Color3.fromRGB(34, 36, 46),
+	placa = Color3.fromRGB(48, 52, 66),
+	costura = Color3.fromRGB(128, 134, 150),
+}
+
+local GIRO_CILINDRO = CFrame.Angles(0, math.pi / 2, 0) -- los cilindros de Roblox van en X; esto los pone en Z
+
+local function crearParte(
+	padre: Instance,
+	nombre: string,
+	clase: string,
+	tamano: Vector3,
+	cf: CFrame,
+	color: Color3,
+	escala: number
+): BasePart
+	local parte = Instance.new(clase) :: BasePart
+	parte.Name = nombre
+	parte.Size = tamano * escala
+	parte.CFrame = CFrame.new(cf.Position * escala) * cf.Rotation
+	parte.Color = color
+	parte.Material = Enum.Material.SmoothPlastic
+	parte.TopSurface = Enum.SurfaceType.Smooth
+	parte.BottomSurface = Enum.SurfaceType.Smooth
+	parte.Anchored = true
+	parte.CanCollide = false
+	parte.CanTouch = false
+	parte.CanQuery = false
+	parte.CastShadow = false
+	parte.Massless = true
+	parte.Parent = padre
+	return parte
+end
+
+local function bloque(padre, nombre, tamano, cf, color, escala)
+	return crearParte(padre, nombre, "Part", tamano, cf, color, escala)
+end
+
+local function cilindro(padre, nombre, largo: number, diametro: number, z: number, color, escala)
+	local parte = crearParte(
+		padre,
+		nombre,
+		"Part",
+		Vector3.new(largo, diametro, diametro),
+		CFrame.new(0, 0, z) * GIRO_CILINDRO,
+		color,
+		escala
+	) :: Part
+	parte.Shape = Enum.PartType.Cylinder
+	return parte
+end
+
+-- Cuña: por defecto es alta en +Z y baja hasta la arista de abajo en -Z.
+local function cuna(padre, nombre, tamano, cf, color, escala)
+	return crearParte(padre, nombre, "WedgePart", tamano, cf, color, escala)
+end
+
+-- Pieza invisible en el origen; sirve de pivote del modelo (y de Handle en la herramienta).
+local function crearRaiz(padre: Instance, escala: number): BasePart
+	local raiz = bloque(padre, "Raiz", Vector3.new(0.3, 0.3, 1), CFrame.new(), Modelo.COLORES.mango, escala)
+	raiz.Transparency = 1
+	return raiz
+end
+
+local function construirCuchillo(padre: Instance, escala: number)
+	local c = Modelo.COLORES
+
+	-- Mango, pomo y virola
+	cilindro(padre, "Mango", 1.4, 0.3, -0.12, c.mango, escala)
+	cilindro(padre, "AnilloMango2", 0.06, 0.34, -0.5, c.mangoAnillo, escala)
+	cilindro(padre, "AnilloMango", 0.06, 0.34, 0.4, c.mangoAnillo, escala)
+	cilindro(padre, "Pomo", 0.14, 0.38, 0.62, c.guarda, escala)
+	cilindro(padre, "TapaPomo", 0.06, 0.26, 0.71, c.guardaOscura, escala)
+	cilindro(padre, "Virola", 0.14, 0.36, -0.74, c.mangoAnillo, escala)
+
+	-- Guarda: dos bloques cruzados para que se vea ochavada
+	bloque(padre, "Guarda", Vector3.new(0.34, 0.76, 0.16), CFrame.new(0, -0.02, -0.89), c.guarda, escala)
+	bloque(padre, "GuardaLado", Vector3.new(0.46, 0.54, 0.15), CFrame.new(0, -0.02, -0.89), c.guardaOscura, escala)
+
+	-- Hoja
+	local alto, grosor = 0.4, 0.07
+	local inicio, largo = -0.97, 2.75
+	local zCentro = inicio - largo / 2
+	local zPunta = inicio - largo
+	local largoPunta = 0.85
+	bloque(padre, "Hoja", Vector3.new(grosor, alto, largo), CFrame.new(0, 0, zCentro), c.hoja, escala)
+	bloque(padre, "Recazo", Vector3.new(0.09, alto, 0.16), CFrame.new(0, 0, inicio - 0.08), c.ranura, escala)
+
+	-- Punta: cuña girada para que el lomo siga recto y el filo suba hasta la punta
+	cuna(
+		padre,
+		"Punta",
+		Vector3.new(grosor, alto, largoPunta),
+		CFrame.new(0, 0, zPunta - largoPunta / 2) * CFrame.Angles(0, 0, math.pi),
+		c.hoja,
+		escala
+	)
+
+	-- Filo brillante a lo largo de la hoja y de la punta
+	local altoFilo = 0.07
+	bloque(
+		padre,
+		"Filo",
+		Vector3.new(grosor + 0.008, altoFilo, largo),
+		CFrame.new(0, -alto / 2 + altoFilo / 2, zCentro),
+		c.filo,
+		escala
+	)
+	local largoRampa = math.sqrt(alto * alto + largoPunta * largoPunta)
+	local angulo = math.atan2(alto, largoPunta)
+	local recorte = 0.12 -- evita que el filo sobresalga del lomo en la punta
+	local dirRampa = Vector3.new(0, alto, -largoPunta) / largoRampa
+	local normal = Vector3.new(0, largoPunta, alto) / largoRampa
+	local centroRampa = Vector3.new(0, 0, zPunta - largoPunta / 2) - dirRampa * (recorte / 2) + normal * (altoFilo / 2)
+	bloque(
+		padre,
+		"FiloPunta",
+		Vector3.new(grosor + 0.008, altoFilo, largoRampa - recorte),
+		CFrame.new(centroRampa) * CFrame.Angles(angulo, 0, 0),
+		c.filo,
+		escala
+	)
+
+	-- Ranura (canal) en el centro de la hoja
+	bloque(padre, "Ranura", Vector3.new(grosor + 0.006, 0.05, 1.9), CFrame.new(0, 0.05, -2.15), c.ranura, escala)
+
+	-- Dientes de sierra en el lomo
+	local dientes, largoDiente, altoDiente = 10, 0.15, 0.09
+	for i = 0, dientes - 1 do
+		cuna(
+			padre,
+			"Diente" .. (i + 1),
+			Vector3.new(grosor, altoDiente, largoDiente),
+			CFrame.new(0, alto / 2 + altoDiente / 2, -1.16 - i * largoDiente),
+			c.dientes,
+			escala
+		)
+	end
+end
+
+local function construirMano(padre: Instance, escala: number, colorPiel: Color3)
+	local c = Modelo.COLORES
+
+	-- Palma y dedos cerrados alrededor del mango
+	bloque(padre, "Palma", Vector3.new(0.36, 0.5, 0.6), CFrame.new(0.12, -0.03, -0.04), colorPiel, escala)
+	local dedos = {
+		{ z = -0.27, x = -0.115, alto = 0.48 },
+		{ z = -0.125, x = -0.125, alto = 0.5 },
+		{ z = 0.02, x = -0.115, alto = 0.46 },
+		{ z = 0.16, x = -0.095, alto = 0.4 },
+	}
+	for i, d in dedos do
+		bloque(
+			padre,
+			"Dedo" .. i,
+			Vector3.new(0.2, d.alto, 0.135),
+			CFrame.new(d.x, -0.04 - (0.5 - d.alto) / 2, d.z),
+			colorPiel,
+			escala
+		)
+	end
+	bloque(
+		padre,
+		"Pulgar",
+		Vector3.new(0.2, 0.14, 0.34),
+		CFrame.new(-0.03, 0.22, -0.18) * CFrame.Angles(0, 0.25, 0),
+		colorPiel,
+		escala
+	)
+
+	-- Guante: dorso, nudillos y una costura clara
+	bloque(padre, "GuanteDorso", Vector3.new(0.15, 0.6, 0.68), CFrame.new(0.33, -0.03, -0.03), c.guante, escala)
+	bloque(padre, "GuanteNudillos", Vector3.new(0.3, 0.13, 0.64), CFrame.new(0.21, 0.24, -0.03), c.guante, escala)
+	bloque(padre, "PlacaDorso", Vector3.new(0.04, 0.4, 0.46), CFrame.new(0.41, 0.0, -0.06), c.placa, escala)
+	bloque(padre, "CosturaDorso", Vector3.new(0.045, 0.035, 0.46), CFrame.new(0.412, 0.12, -0.06), c.costura, escala)
+end
+
+local function construirAntebrazo(padre: Instance, escala: number)
+	local c = Modelo.COLORES
+
+	-- Marco del antebrazo: sale de la muñeca hacia atras, abajo y a la derecha
+	local muneca = CFrame.new(0.12, -0.03, 0.27) * CFrame.Angles(math.rad(16), math.rad(14), 0)
+	local function en(x, y, z)
+		return muneca * CFrame.new(x, y, z)
+	end
+
+	bloque(padre, "Puno", Vector3.new(0.72, 0.72, 0.32), en(0, 0, 0.2), c.placa, escala)
+	bloque(padre, "CosturaPuno", Vector3.new(0.73, 0.73, 0.04), en(0, 0, 0.37), c.costura, escala)
+	bloque(padre, "Manga", Vector3.new(0.64, 0.64, 2.8), en(0, 0, 1.75), c.guante, escala)
+
+	-- Placas de armadura arriba y afuera, con costuras claras
+	bloque(padre, "PlacaArriba", Vector3.new(0.52, 0.05, 1.0), en(0, 0.34, 0.95), c.placa, escala)
+	bloque(padre, "PlacaAfuera", Vector3.new(0.05, 0.5, 1.0), en(0.34, 0, 0.95), c.placa, escala)
+	bloque(padre, "PlacaArriba2", Vector3.new(0.52, 0.05, 0.8), en(0, 0.34, 2.05), c.placa, escala)
+	bloque(padre, "PlacaAfuera2", Vector3.new(0.05, 0.5, 0.8), en(0.34, 0, 2.05), c.placa, escala)
+	bloque(padre, "CosturaArriba", Vector3.new(0.04, 0.055, 1.0), en(0.15, 0.342, 0.95), c.costura, escala)
+	bloque(padre, "CosturaAfuera", Vector3.new(0.055, 0.04, 1.0), en(0.342, 0.12, 0.95), c.costura, escala)
+	bloque(padre, "CosturaCruz", Vector3.new(0.53, 0.06, 0.04), en(0, 0.342, 1.5), c.costura, escala)
+	bloque(padre, "CosturaCruzAfuera", Vector3.new(0.06, 0.51, 0.04), en(0.342, 0, 1.5), c.costura, escala)
+end
+
+-- Cuchillo solo (para la herramienta que ven los demas). La raiz esta en el mango.
+function Modelo.crearCuchillo(escala: number): Model
+	local modelo = Instance.new("Model")
+	modelo.Name = "Cuchillo"
+	modelo.PrimaryPart = crearRaiz(modelo, escala)
+	construirCuchillo(modelo, escala)
+	return modelo
+end
+
+-- Mano + antebrazo + cuchillo para la camara en primera persona.
+function Modelo.crearViewmodel(escala: number, colorPiel: Color3?): Model
+	local modelo = Instance.new("Model")
+	modelo.Name = "ViewmodelCuchillo"
+	modelo.PrimaryPart = crearRaiz(modelo, escala)
+	construirCuchillo(modelo, escala)
+	construirMano(modelo, escala, colorPiel or Modelo.COLORES.piel)
+	construirAntebrazo(modelo, escala)
+	return modelo
+end
+
+return Modelo
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Script" referent="6">
+      <Properties>
+        <string name="Name">Servidor</string>
+        <token name="RunContext">1</token>
+        <string name="Source"><![CDATA[-- Servidor: arma el cuchillo que ven los demas jugadores y aplica el dano.
+-- Va dentro de la herramienta (Script con RunContext = Server).
+
+local Debris = game:GetService("Debris")
+local Players = game:GetService("Players")
+
+local herramienta = script.Parent
+local Config = require(herramienta:WaitForChild("Config"))
+local Modelo = require(herramienta:WaitForChild("Modelo"))
+local eventoAtaque = herramienta:WaitForChild("Ataque") :: RemoteEvent
+
+-- Cuchillo visible para todos: sus piezas se sueldan a la pieza "Handle",
+-- que es la que la mano del personaje agarra.
+local function crearHandle()
+	if herramienta:FindFirstChild("Handle") then
+		return
+	end
+	local cuchillo = Modelo.crearCuchillo(Config.ESCALA_MUNDO)
+	local handle = cuchillo.PrimaryPart :: BasePart
+	handle.Name = "Handle"
+	for _, parte in cuchillo:GetChildren() do
+		if parte ~= handle and parte:IsA("BasePart") then
+			local soldadura = Instance.new("WeldConstraint")
+			soldadura.Part0 = handle
+			soldadura.Part1 = parte
+			soldadura.Parent = parte
+			parte.Anchored = false
+			parte.Parent = handle
+		end
+	end
+	handle.Anchored = false
+	handle.Parent = herramienta
+	cuchillo:Destroy()
+end
+
+local function mismoEquipo(a: Player, b: Player?): boolean
+	if not b or a.Neutral or b.Neutral then
+		return false
+	end
+	local equipo: Team? = a.Team
+	return equipo ~= nil and equipo == b.Team
+end
+
+local function hayParedEntre(desde: Vector3, hasta: Vector3, ignorar: { Instance }): boolean
+	local parametros = RaycastParams.new()
+	parametros.FilterType = Enum.RaycastFilterType.Exclude
+	parametros.FilterDescendantsInstances = ignorar
+	return workspace:Raycast(desde, hasta - desde, parametros) ~= nil
+end
+
+-- Busca el humanoide mas cercano y mas centrado delante de ti.
+local function buscarObjetivo(personaje: Model, origen: Vector3, direccion: Vector3): Humanoid?
+	local parametros = OverlapParams.new()
+	parametros.FilterType = Enum.RaycastFilterType.Exclude
+	parametros.FilterDescendantsInstances = { personaje }
+	local partes = workspace:GetPartBoundsInRadius(
+		origen + direccion * (Config.ALCANCE / 2),
+		Config.ALCANCE / 2 + 1,
+		parametros
+	)
+
+	local mejor: Humanoid? = nil
+	local mejorPuntaje = -math.huge
+	local revisados: { [Humanoid]: boolean } = {}
+	for _, parte in partes do
+		local modelo = parte:FindFirstAncestorOfClass("Model")
+		local humanoide = modelo and modelo:FindFirstChildOfClass("Humanoid")
+		if modelo and humanoide and not revisados[humanoide] then
+			revisados[humanoide] = true
+			local raiz = modelo:FindFirstChild("HumanoidRootPart")
+			local centro = if raiz and raiz:IsA("BasePart") then raiz.Position else parte.Position
+			local hacia = centro - origen
+			local distancia = hacia.Magnitude
+			local alineacion = if distancia > 0.01 then hacia.Unit:Dot(direccion) else 1
+			local delante = alineacion > 0.35 or distancia < 2.5
+			if
+				humanoide.Health > 0
+				and distancia <= Config.ALCANCE
+				and delante
+				and not hayParedEntre(origen, centro, { personaje, modelo })
+			then
+				local puntaje = alineacion - distancia / Config.ALCANCE
+				if puntaje > mejorPuntaje then
+					mejor, mejorPuntaje = humanoide, puntaje
+				end
+			end
+		end
+	end
+	return mejor
+end
+
+local ultimoGolpe = -math.huge
+
+eventoAtaque.OnServerEvent:Connect(function(jugador: Player, direccion: any)
+	-- Solo cuenta si quien ataca es el dueno y tiene el cuchillo en la mano
+	local personaje = herramienta.Parent
+	if not (personaje and personaje:IsA("Model")) or Players:GetPlayerFromCharacter(personaje) ~= jugador then
+		return
+	end
+	local humanoide = personaje:FindFirstChildOfClass("Humanoid")
+	local cabeza = personaje:FindFirstChild("Head")
+	if not (humanoide and humanoide.Health > 0 and cabeza and cabeza:IsA("BasePart")) then
+		return
+	end
+
+	-- El servidor tambien controla el tiempo entre tajos (no se puede saltar desde el cliente)
+	local ahora = os.clock()
+	if ahora - ultimoGolpe < Config.ENFRIAMIENTO * 0.8 then
+		return
+	end
+	ultimoGolpe = ahora
+
+	local mirada: Vector3 = cabeza.CFrame.LookVector
+	if typeof(direccion) == "Vector3" and direccion.Magnitude > 0.5 and direccion.Magnitude < 1.5 then
+		mirada = direccion.Unit
+	end
+
+	local objetivo = buscarObjetivo(personaje, cabeza.Position, mirada)
+	if not objetivo then
+		return
+	end
+	local otroJugador = Players:GetPlayerFromCharacter(objetivo.Parent)
+	if not Config.DANO_A_COMPANEROS and mismoEquipo(jugador, otroJugador) then
+		return
+	end
+
+	-- Etiqueta "creator": la usan muchos tableros de puntuacion para contar bajas
+	local etiquetaVieja = objetivo:FindFirstChild("creator")
+	if etiquetaVieja then
+		etiquetaVieja:Destroy()
+	end
+	local etiqueta = Instance.new("ObjectValue")
+	etiqueta.Name = "creator"
+	etiqueta.Value = jugador
+	etiqueta.Parent = objetivo
+	Debris:AddItem(etiqueta, 2)
+
+	objetivo:TakeDamage(Config.DANO)
+end)
+
+crearHandle()
+]]></string>
+      </Properties>
+    </Item>
+  </Item>
+</roblox>
